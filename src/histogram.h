@@ -1,11 +1,3 @@
-/*
- * @Author: Hsuan-Wei Fan
- * @Date: 2020-06-02 18:07:58
- * @LastEditors: Hsuan-Wei Fan
- * @LastEditTime: 2020-06-02 21:23:11
- * @Description: 
- */
-
 #ifndef CARDINALITY_ESTIMATION_HISTOGRAM_H
 #define CARDINALITY_ESTIMATION_HISTOGRAM_H
 
@@ -13,24 +5,24 @@
 #include <fstream>
 #include <map>
 
-namespace CardEst
-{
-  struct Histogram
-  {
+namespace CardEst {
+
+struct Histogram {
     Histogram() = default;
     void AddData(Value value);
     uint32_t data[HISTO_SIZE];
-  };
+};
 
-  class HistogramManager
-  {
-  public:
+class HistogramManager {
+public:
     HistogramManager() = default;
+    int CalcHistogram(const std::string &chartName);
 
-  private:
-    std::string chartName;
-    std::map<Key, std::unique_ptr<Histogram>> histograms;
-  };
+private:
+    std::string dataDirectory;
+    typedef std::map<Key, std::unique_ptr<Histogram>> ChartHistogram;
+    std::map<std::string, std::unique_ptr<ChartHistogram>> histograms; // ChartName <-> Histogram
+};
 
 } // namespace CardEst
 #endif // CARDINALITY_ESTIMATION_HISTOGRAM_H

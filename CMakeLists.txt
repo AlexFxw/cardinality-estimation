@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(SOURCES
         src/histogram.cpp
+        src/table.cpp
         )
 
 include_directories(src)
