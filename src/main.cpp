@@ -6,8 +6,6 @@
  * @Description: main function
  */
 
-
-
 #include <iostream>
 #include <string>
 #include "utils.h"
@@ -31,6 +29,7 @@ int main(int argc, char **argv) {
     // ParseQuery("../data/sample_input_homework/easy.sql");
 
     TableManager tableManager;
+    // tableManager.ParseCreateSql("../data/imdb/test.sql");
     tableManager.ParseCreateSql("../data/imdb/test.sql");
     return 0;
 }

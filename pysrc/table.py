@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import re
 from tqdm import tqdm
 import os
+from numba import jit
 import threading
 import pickle
 
@@ -72,6 +73,22 @@ class KeyAttribute:
         return self.attribute_type == AttribueType.INT
 
 
+@jit(nopython=True, signature_or_function="void(int32,int32,int32,float32,boolean,int32,int32[:])")
+def add_data(value, start, end, unit, scaled, interval, data):
+    if start <= value <= end:
+        if not scaled:
+            index = value - start + 1
+        else:
+            index = (value - start) * unit + 1
+            index = int(index)
+    else:
+        if value < start:
+            index = 0
+        elif value > end:
+            index = interval - 1
+    data[index] = data[index] + 1
+
+
 class Histogram(object):
     def __init__(self, info: HistogramInfo):
         super().__init__()
@@ -88,20 +105,21 @@ class Histogram(object):
             self.data[index] = self.data[index] + 1
 
     def add_data(self, value):
-        index = self.get_index(value)
-        self.data[index] = self.data[index] + 1
+        index = add_data(value, self.range_start, self.range_end, self.unit, self.scaled, self.interval, self.data)
+        # self.data[index] = self.data[index] + 1
 
     def get_index(self, data):
-        if data < self.range_start:
-            index = 0
-        elif data > self.range_end:
-            index = self.interval - 1
-        else:
-            if self.scaled:
+        if self.range_start <= data <= self.range_end:
+            if not self.scaled:
+                index = data - self.range_start + 1
+            else:
                 index = (data - self.range_start) * self.unit + 1
                 index = int(index)
-            else:
-                index = data - self.range_start + 1
+        else:
+            if data < self.range_start:
+                index = 0
+            elif data > self.range_end:
+                index = self.interval - 1
         return index
 
     def query(self, value, relation: str):
@@ -128,6 +146,12 @@ class Histogram(object):
         for i in range(start, end):
             estimation = estimation + min(hist_a.query_certain_val(i), hist_b.query_certain_val(i))
         return estimation
+
+
+@jit(nopython=True)
+def separate_csv(line):
+    line = line.strip('\n')
+    return re.split(',', line)
 
 
 class Table(object):
@@ -198,9 +222,13 @@ class Table(object):
                 return
 
         with open(f'{self.csv_dir}/{self.chart_name}.csv', 'r') as f:
-            line = True
             lines = f.readlines()
             line_num = len(lines)
+            eff_index = []
+            for i, key_attribute in enumerate(self.key_attributes):
+                if key_attribute.IsInt():
+                    eff_index.append(i)
+
             with tqdm(total=line_num) as pbar:
                 pbar.set_description(f'Calculating the histograms of {self.chart_name}')
                 for index, line in enumerate(lines):
@@ -210,12 +238,18 @@ class Table(object):
                     if len(items) != self.col_num:
                         continue
 
-                    for i, item in enumerate(items):
+                    for i in eff_index:
+                        item = items[i]
                         if item == '':
                             continue
-                        if self.key_attributes[i].IsInt():
-                            key = self.key_attributes[i].key_label
-                            self.histograms[key].add_data(np.int32(item))
+                        key = self.key_attributes[i].key_label
+                        self.histograms[key].add_data(np.int32(item))
+                    # for i, item in enumerate(items):
+                    #     if item == '':
+                    #         continue
+                    #     if self.key_attributes[i].IsInt():
+                    #         key = self.key_attributes[i].key_label
+                    #         self.histograms[key].add_data(np.int32(item))
 
             with open(checkpoint_path, 'wb') as pkl:
                 pickle.dump(self.histograms, pkl)
