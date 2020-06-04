@@ -11,5 +11,6 @@ CONFIG = {
     'CACHE_ITEMS': 1000
 }
 
-USE_CHECKPOINTS = False
+USE_CHECKPOINTS = True
+write_checkpoints = False
 checkpoint_dir = '../data/checkpoints'

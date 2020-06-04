@@ -99,11 +99,6 @@ class Histogram(object):
         self.unit = info.unit
         self.data = np.zeros(self.interval, dtype=np.int32)
 
-    def calc(self, cache_data):
-        for data in cache_data:
-            index = self.get_index(data)
-            self.data[index] = self.data[index] + 1
-
     def add_data(self, value):
         index = add_data(value, self.range_start, self.range_end, self.unit, self.scaled, self.interval, self.data)
         # self.data[index] = self.data[index] + 1
@@ -124,10 +119,12 @@ class Histogram(object):
 
     def query(self, value, relation: str):
         index = self.get_index(value)
+        res = 0
         if relation == '<':
-            return sum(self.data[:index])
+            res = sum(self.data[:index])
         elif relation == '>':
-            return sum(self.data[index:])
+            res = sum(self.data[index:])
+        return res
 
     def query_certain_val(self, value):
         index = self.get_index(value)
@@ -211,12 +208,15 @@ class Table(object):
             if histogram_utils.info_cached(key):
                 self.histograms[key] = Histogram(histogram_utils.get_info(key))
             else:
-                print(f'No cached info for {key} in table {self.chart_name}')
+                print(f'No cached info for {key} in table {self.chart_name}. Use default')
+                info = HistogramInfo(0, 300000, False, 1, 300000 + 2)
+                self.histograms[key] = Histogram(info)
 
     def calc_histograms(self):
         checkpoint_path = f'{utils.checkpoint_dir}/{self.chart_name}.pkl'
         if utils.USE_CHECKPOINTS:
             if os.path.exists(checkpoint_path):
+                print(f'Load cached histogram of table {self.chart_name}')
                 with open(checkpoint_path, 'rb') as f:
                     self.histograms = pickle.load(f)
                 return
@@ -250,9 +250,9 @@ class Table(object):
                     #     if self.key_attributes[i].IsInt():
                     #         key = self.key_attributes[i].key_label
                     #         self.histograms[key].add_data(np.int32(item))
-
-            with open(checkpoint_path, 'wb') as pkl:
-                pickle.dump(self.histograms, pkl)
+            if utils.write_checkpoints:
+                with open(checkpoint_path, 'wb') as pkl:
+                    pickle.dump(self.histograms, pkl)
 
     def estimate(self, key_name, comp, value):
         return self.histograms[key_name].query(value, comp)
@@ -343,10 +343,9 @@ class TableManager(object):
         #         t.join()
 
     @staticmethod
-    def calc_histogram(tables, key_list, pbar):
+    def calc_histogram(tables, key_list):
         for key in key_list:
             tables[key].calc_histograms()
-            pbar.update()
 
 
 class QueryManager(object):
@@ -354,48 +353,45 @@ class QueryManager(object):
         self.file_dir = file_dir
         self.table_manager = table_manager
 
-    def process(self, file_name):
+    def process(self, file_name, ground_truth: list):
         file_path = f'{self.file_dir}/{file_name}'
         with open(file_path, 'r') as f:
             raw_data = f.read()
             statements = sqlparse.split(raw_data)
-            query_num = len(statements)
-            with tqdm(total=query_num) as pbar:
-                pbar.set_description(f'Processing {file_name}')
-                for i, statement in enumerate(statements):
-                    pbar.update()
-                    parse_res = sqlparse.parse(statement)
-                    if len(parse_res) == 0:
-                        continue
-                    query = parse_res[0]
-                    var_list = []
-                    conditions = []
-                    for token in query.get_sublists():
-                        if type(token) == sqlparse.sql.Where:
-                            # The condition
-                            for tk in token.tokens:
-                                if type(tk) == sqlparse.sql.Comparison:
-                                    conditions.append(tk)
-                        elif type(token) == sqlparse.sql.Identifier:
-                            # single to select
-                            var_list.append(str(token))
-                        elif type(token) == sqlparse.sql.IdentifierList:
-                            # Multipule to select
-                            for tk in token.tokens:
-                                if type(tk) == sqlparse.sql.Identifier:
-                                    var_list.append(str(tk))
-                    variables = dict()
-                    for v in var_list:
-                        items = re.split(' ', v)
-                        variables[items[1]] = items[0]
-                    self.estimate(variables, conditions)
+            for i, statement in enumerate(statements):
+                parse_res = sqlparse.parse(statement)
+                if len(parse_res) == 0:
+                    continue
+                query = parse_res[0]
+                var_list = []
+                conditions = []
+                for token in query.get_sublists():
+                    if type(token) == sqlparse.sql.Where:
+                        # The condition
+                        for tk in token.tokens:
+                            if type(tk) == sqlparse.sql.Comparison:
+                                conditions.append(tk)
+                    elif type(token) == sqlparse.sql.Identifier:
+                        # single to select
+                        var_list.append(str(token))
+                    elif type(token) == sqlparse.sql.IdentifierList:
+                        # Multipule to select
+                        for tk in token.tokens:
+                            if type(tk) == sqlparse.sql.Identifier:
+                                var_list.append(str(tk))
+                variables = dict()
+                for v in var_list:
+                    items = re.split(' ', v)
+                    variables[items[1]] = items[0]
+                res = self.estimate(variables, conditions)
+                print(f'Estimation / Ground Truth of query {i} is: {res} vs {ground_truth[i]}')
 
     def estimate(self, variables: dict, conditions: list):
         estimation = None
         for cond in conditions:
             items = cond.tokens
             lv = re.split('\\.', str(items[0]))
-            lvalue = (variables[lv[0]], lv[1])
+            table_name, key = variables[lv[0]], lv[1]
             comp = str(items[1])
             if comp == '=':
                 # TODO
@@ -409,7 +405,6 @@ class QueryManager(object):
                     rvalue = np.int32(str(rv))
             elif comp == '>' or comp == '<':
                 rvalue = np.int32(str(items[2]))
-                table_name, key = lvalue
             res = self.table_manager.estimate(table_name, key, comp, rvalue)
             estimation = min(res, estimation) if estimation is not None else res
         return estimation
@@ -424,11 +419,22 @@ def test_table(csv_dir):
     table.calc_histograms()
 
 
+def load_true_rows(data_dir, level_name):
+    answers = []
+    with open(f'{data_dir}/{level_name}.normal', 'r') as f:
+        for line in f.readlines():
+            line = line.strip('\n')
+            answers.append(np.int32(line))
+    return answers
+
+
 def test_query_manager(table_manager: TableManager):
     query_dir = '../data/sample_input_homework'
-    file_name = 'test.sql'
+    true_dir = '../data/true_rows'
+    ground_truth = load_true_rows(true_dir, 'easy')
+    file_name = 'easy.sql'
     query_manager = QueryManager(query_dir, table_manager)
-    query_manager.process(file_name)
+    query_manager.process(file_name, ground_truth)
 
 
 if __name__ == '__main__':
