@@ -6,11 +6,12 @@ import numpy as np
 from enum import Enum
 from dataclasses import dataclass
 import re
+import gc
 from tqdm import tqdm
 import os
 from numba import jit
 import pickle
-from histogram import HistogramInfo, HistogramUtils, Histogram
+from histogram import HistogramInfo, HistogramUtils, HistogramId, HistogramInt
 
 logger = GetLogger('Main')
 
@@ -43,6 +44,10 @@ def separate_csv(line):
     return re.split(',', line)
 
 
+def process_line(lines, ):
+    pass
+
+
 class Table(object):
     def __init__(self, key_list: list, type_list: list, csv_dir: str, chart_name: str):
         super().__init__()
@@ -53,6 +58,7 @@ class Table(object):
         self.csv_dir = csv_dir
         self.chart_name = chart_name
         self.interval = dict()
+        self.data_num = 0
 
     def bind_attribute(self, key_list: list, type_list: list) -> list:
         res = list()
@@ -97,12 +103,11 @@ class Table(object):
             if not key_attribute.IsInt():  # only deal with int data yet
                 continue
             key = key_attribute.key_label
-            if histogram_utils.info_cached(key):
-                self.histograms[key] = Histogram(histogram_utils.get_info(key))
+            if self.chart_name == 'cast_info' and key == 'id':
+                info = HistogramInfo(0, 40000000, True, 0.01, 400000)
             else:
-                print(f'No cached info for {key} in table {self.chart_name}. Use default')
-                info = HistogramInfo(0, 300000, False, 1, 300000 + 2)
-                self.histograms[key] = Histogram(info)
+                info = HistogramInfo(0, 4000000, True, 0.1, 400000)
+            self.histograms[key] = Histogram(info)
 
     def calc_histograms(self):
         checkpoint_path = f'{utils.checkpoint_dir}/{self.chart_name}.pkl'
@@ -111,17 +116,18 @@ class Table(object):
                 print(f'Load cached histogram of table {self.chart_name}')
                 with open(checkpoint_path, 'rb') as f:
                     self.histograms = pickle.load(f)
+                    self.data_num = self.histograms['id'].data_num  # FIXME: No need after recomputing
                 return
 
         with open(f'{self.csv_dir}/{self.chart_name}.csv', 'r') as f:
             lines = f.readlines()
-            line_num = len(lines)
-            eff_index = []
+            data_num = len(lines)
+            self.data_num = data_num
             for i, key_attribute in enumerate(self.key_attributes):
-                if key_attribute.IsInt():
-                    eff_index.append(i)
+                key = key_attribute.key_label
+                self.histograms[key] = HistogramId(data_num)
 
-            with tqdm(total=line_num) as pbar:
+            with tqdm(total=data_num) as pbar:
                 pbar.set_description(f'Calculating the histograms of {self.chart_name}')
                 for index, line in enumerate(lines):
                     pbar.update()
@@ -130,12 +136,13 @@ class Table(object):
                     if len(items) != self.col_num:
                         continue
 
-                    for i in eff_index:
+                    for i, key_attribute in enumerate(self.key_attributes):
+                        key = key_attribute.key_label
                         item = items[i]
                         if item == '':
                             continue
-                        key = self.key_attributes[i].key_label
-                        self.histograms[key].add_data(np.int32(item))
+                        if key_attribute.IsInt():
+                            self.histograms[key].add_data(np.int32(item))
 
             if utils.write_checkpoints:
                 with open(checkpoint_path, 'wb') as pkl:
@@ -143,9 +150,6 @@ class Table(object):
 
     def estimate(self, key_name, comp, value):
         return self.histograms[key_name].query(value, comp)
-
-    def estimate_certain_value(self, key_name, value):
-        return self.histograms[key_name].query_certain_val(value)
 
 
 class TableManager(object):
@@ -171,8 +175,6 @@ class TableManager(object):
                     key_list = list()
                     type_list = list()
                     for key in token.tokens:
-                        # if str(key.ttype) == 'Token.Keyword':
-                        #     print(str(key))
                         if type(key) == sqlparse.sql.Identifier:
                             key_list.append(str(key))
                         elif type(key) == sqlparse.sql.IdentifierList:
@@ -182,51 +184,29 @@ class TableManager(object):
                                     key_list.append(str(t))
                         elif str(key) == 'character' or str(key) == 'integer':
                             type_list.append(str(key))
-                    logger.debug(f'{cur_table}: {key_list}, {type_list}; {len(key_list)} vs {len(type_list)}')
-            self.tables[cur_table] = Table(key_list, type_list, self.csv_dir, cur_table)
+                    logger.debug(
+                        f'{cur_table}: {key_list}, {type_list}; {len(key_list)} vs {len(type_list)}')
+            self.tables[cur_table] = Table(
+                key_list, type_list, self.csv_dir, cur_table)
 
     def estimate(self, table_name: str, key: str, comp: str, rvalue):
         # for < and >
-        if comp == '<' or comp == '>':
-            return self.tables[table_name].estimate(key, comp, rvalue)
+        if comp == '<' or comp == '>' or (comp == '=' and type(rvalue) == np.int32):
+            res = self.tables[table_name].estimate(key, comp, rvalue)
+            return res
         else:
-            if type(rvalue) == np.int32:
-                return self.tables[table_name].estimate_certain_value(key, rvalue)
-            else:
-                rtable_name, r_key = rvalue
-                hist_a = self.tables[table_name].histograms[key]
-                hist_b = self.tables[rtable_name].histograms[r_key]
-                return Histogram.estimate_overlap(hist_a, hist_b)
+            rtable_name, r_key = rvalue
+            hist_a = self.tables[table_name].histograms[key]
+            hist_b = self.tables[rtable_name].histograms[r_key]
+            res = HistogramId.estimate_overlap(hist_a, hist_b)
+            return res
 
     def calc_histograms(self):
         table_list = [key for key in self.tables.keys()]
 
-        with tqdm(total=len(table_list)) as pbar:
-            pbar.set_description('Preparing the histogram utils')
-            for key in self.tables.keys():
-                self.tables[key].prepare_histogram(self.histogram_utils)
-                pbar.update()
-
         for table_name in table_list:
-            self.tables[table_name].init_histograms(self.histogram_utils)
             self.tables[table_name].calc_histograms()
-
-        # with tqdm(total=len(table_list)) as pbar:
-        #     pbar.set_description('Calculating the histograms of tables')
-        #     cnt = 0
-        #     threads = []
-        #     single_num = int(len(table_list) / 8)
-        #     for i in range(0, 7):
-        #         t = threading.Thread(target=TableManager.calc_histogram,
-        #                              args=(self.tables, table_list[cnt:cnt + single_num], pbar,))
-        #         cnt = cnt + single_num
-        #         threads.append(t)
-        #     t_last = threading.Thread(target=TableManager.calc_histogram, args=(self.tables, table_list[cnt:], pbar,))
-        #     threads.append(t_last)
-        #     for t in threads:
-        #         t.start()
-        #     for t in threads:
-        #         t.join()
+            gc.collect()
 
     @staticmethod
     def calc_histogram(tables, key_list):
@@ -270,14 +250,17 @@ class QueryManager(object):
                     items = re.split(' ', v)
                     variables[items[1]] = items[0]
                 res = self.estimate(variables, conditions)
-                print(f'Estimation / Ground Truth of query {i} is: {res} vs {ground_truth[i]}')
+                print(
+                    f'Estimation / Ground Truth of query {i + 1} is: {res} vs {ground_truth[i]}, {res / ground_truth[i]}')
 
     def estimate(self, variables: dict, conditions: list):
-        estimation = None
+        estimation = 1
+        tables = dict()
         for cond in conditions:
             items = cond.tokens
             lv = re.split('\\.', str(items[0]))
             table_name, key = variables[lv[0]], lv[1]
+            tables[table_name] = True
             comp = str(items[1])
             if comp == '=':
                 # TODO
@@ -292,8 +275,11 @@ class QueryManager(object):
             elif comp == '>' or comp == '<':
                 rvalue = np.int32(str(items[2]))
             res = self.table_manager.estimate(table_name, key, comp, rvalue)
-            estimation = min(res, estimation) if estimation is not None else res
-        return estimation
+            estimation = estimation * res
+
+        for table in tables.keys():
+            estimation = estimation * self.table_manager.tables[table].data_num
+        return int(estimation)
 
 
 def test_table(csv_dir):
@@ -318,7 +304,7 @@ def test_query_manager(table_manager: TableManager):
     query_dir = '../data/sample_input_homework'
     true_dir = '../data/true_rows'
     ground_truth = load_true_rows(true_dir, 'easy')
-    file_name = 'easy.sql'
+    file_name = 'test.sql'
     query_manager = QueryManager(query_dir, table_manager)
     query_manager.process(file_name, ground_truth)
 
