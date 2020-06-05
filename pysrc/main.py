@@ -290,7 +290,7 @@ def test_query_manager(table_manager: TableManager):
     file_name = 'easy.sql'
     query_manager = QueryManager(query_dir, table_manager)
     res_list = query_manager.process(file_name, ground_truth, 50)
-    # print(f'Ratio info, mean: {np.mean(res_list)}, median: {np.median(res_list)}')
+    print(f'Ratio info, mean: {np.mean(res_list)}, median: {np.median(res_list)}')
     # plt.plot(res_list)
     # plt.show()
 

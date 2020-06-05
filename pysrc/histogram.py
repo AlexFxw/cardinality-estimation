@@ -72,15 +72,21 @@ def calc_overlap(a_values, a_counts, a_data_num, a_item_num,
     end = min(a_values[-1], b_values[-1])
     if start >= end:
         return 0
+    iter = 0
     for i in range(0, a_item_num):
         a = a_values[i]
         if a < start:
             continue
         if a > end:
             break
-        for k in range(0, b_item_num):
+        for k in range(iter, b_item_num):
             if b_values[k] == a:
                 res = res + (a_counts[i] * a_num_inv) * (b_counts[k] * b_num_inv)
+                iter = k
+                break
+            elif b_values[k] > a:
+                iter = max(k-1, 0)
+                break
     return res
 
 
@@ -100,7 +106,7 @@ class Histogram:
     def query(self, value: int, relation: str):
         if relation == '=':
             index = np.where(self.values == value)
-            return self.counts[index] if len(index) > 0 else 0
+            res = self.counts[index] if len(index) > 0 else 0
         else:
             if relation == '<':
                 items = np.argwhere(self.values < value)
@@ -112,5 +118,6 @@ class Histogram:
 
     @staticmethod
     def estimate_overlap(hist_a, hist_b):
-        calc_overlap(hist_a.values, hist_a.counts, hist_a.data_num, hist_a.item_num,
-                     hist_b.values, hist_b.counts, hist_b.data_num, hist_b.item_num)
+        res = calc_overlap(hist_a.values, hist_a.counts, hist_a.data_num, hist_a.item_num,
+                            hist_b.values, hist_b.counts, hist_b.data_num, hist_b.item_num)
+        return res
