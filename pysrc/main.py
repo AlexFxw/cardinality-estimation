@@ -1,4 +1,3 @@
-from utils import CONFIG, GetLogger, USE_CHECKPOINTS
 import utils
 import sqlparse
 import parser
@@ -11,15 +10,10 @@ from tqdm import tqdm
 import os
 from numba import jit
 import pickle
-from histogram import HistogramInfo, HistogramUtils, HistogramId, HistogramInt
+from histogram import Histogram
+from matplotlib import pyplot as plt
 
-logger = GetLogger('Main')
-
-
-class Op(Enum):
-    GREATER = 0
-    LESS = 1
-    EQUAL = 2
+logger = utils.GetLogger('Main')
 
 
 class AttribueType(Enum):
@@ -36,16 +30,6 @@ class KeyAttribute:
 
     def IsInt(self):
         return self.attribute_type == AttribueType.INT
-
-
-@jit(nopython=True)
-def separate_csv(line):
-    line = line.strip('\n')
-    return re.split(',', line)
-
-
-def process_line(lines, ):
-    pass
 
 
 class Table(object):
@@ -72,62 +56,25 @@ class Table(object):
             res.append(KeyAttribute(key_list[i], attribute_type))
         return res
 
-    def prepare_histogram(self, histogram_util: HistogramUtils):
-        # Cache the histogram information
-        with open(f'{self.csv_dir}/{self.chart_name}.csv', 'r') as f:
-            cache_data = dict()
-            cache_lines = f.readlines(CONFIG['CACHE_ITEMS'])
-            for index, line in enumerate(cache_lines):
-                line = line.strip('\n')
-                items = re.split(',', line)
-                if len(items) != self.col_num:
-                    continue
-                for i, item in enumerate(items):
-                    if item == '':
-                        continue
-                    if self.key_attributes[i].IsInt():
-                        key = self.key_attributes[i].key_label
-                        if key not in cache_data.keys():
-                            cache_data[key] = list()
-                        val = np.int32(item)
-                        cache_data[key].append(val)
-            for i, key_attribute in enumerate(self.key_attributes):
-                if not key_attribute.IsInt():
-                    continue
-                key = key_attribute.key_label
-                if not histogram_util.info_cached(key) and key in cache_data.keys():
-                    histogram_util.compute_info(key, cache_data[key])
-
-    def init_histograms(self, histogram_utils: HistogramUtils):
-        for key_attribute in self.key_attributes:
-            if not key_attribute.IsInt():  # only deal with int data yet
-                continue
-            key = key_attribute.key_label
-            if self.chart_name == 'cast_info' and key == 'id':
-                info = HistogramInfo(0, 40000000, True, 0.01, 400000)
-            else:
-                info = HistogramInfo(0, 4000000, True, 0.1, 400000)
-            self.histograms[key] = Histogram(info)
-
-    def calc_histograms(self):
+    def calc_histograms(self, used_keys: list):
         checkpoint_path = f'{utils.checkpoint_dir}/{self.chart_name}.pkl'
-        if utils.USE_CHECKPOINTS:
+        if utils.use_checkpoints:
             if os.path.exists(checkpoint_path):
                 print(f'Load cached histogram of table {self.chart_name}')
                 with open(checkpoint_path, 'rb') as f:
                     self.histograms = pickle.load(f)
-                    self.data_num = self.histograms['id'].data_num  # FIXME: No need after recomputing
                 return
+
+        key_index = [i for i, key_attr in enumerate(self.key_attributes) if key_attr.key_label in used_keys]
+        logger.info(f'Used keys in calculating the histograms of {self.chart_name}: {used_keys}')
 
         with open(f'{self.csv_dir}/{self.chart_name}.csv', 'r') as f:
             lines = f.readlines()
-            data_num = len(lines)
-            self.data_num = data_num
-            for i, key_attribute in enumerate(self.key_attributes):
-                key = key_attribute.key_label
-                self.histograms[key] = HistogramId(data_num)
+            self.data_num = len(lines)
 
-            with tqdm(total=data_num) as pbar:
+            cache_data = dict()
+
+            with tqdm(total=self.data_num) as pbar:
                 pbar.set_description(f'Calculating the histograms of {self.chart_name}')
                 for index, line in enumerate(lines):
                     pbar.update()
@@ -136,15 +83,21 @@ class Table(object):
                     if len(items) != self.col_num:
                         continue
 
-                    for i, key_attribute in enumerate(self.key_attributes):
-                        key = key_attribute.key_label
+                    for i in key_index:
                         item = items[i]
                         if item == '':
                             continue
-                        if key_attribute.IsInt():
-                            self.histograms[key].add_data(np.int32(item))
+                        key = self.key_attributes[i].key_label
+                        try:
+                            cache_data[key].append(np.int32(item))
+                        except KeyError:
+                            cache_data[key] = list()
+
+            for key in used_keys:
+                self.histograms[key] = Histogram(cache_data[key], self.data_num)
 
             if utils.write_checkpoints:
+                print(f'Save the cache histograms of {self.chart_name}')
                 with open(checkpoint_path, 'wb') as pkl:
                     pickle.dump(self.histograms, pkl)
 
@@ -157,7 +110,6 @@ class TableManager(object):
         super().__init__()
         self.tables = dict()
         self.csv_dir = csv_dir
-        self.histogram_utils = HistogramUtils()
 
     def parse(self, raw_statements):
         for raw_statement in raw_statements:
@@ -184,8 +136,6 @@ class TableManager(object):
                                     key_list.append(str(t))
                         elif str(key) == 'character' or str(key) == 'integer':
                             type_list.append(str(key))
-                    logger.debug(
-                        f'{cur_table}: {key_list}, {type_list}; {len(key_list)} vs {len(type_list)}')
             self.tables[cur_table] = Table(
                 key_list, type_list, self.csv_dir, cur_table)
 
@@ -198,60 +148,101 @@ class TableManager(object):
             rtable_name, r_key = rvalue
             hist_a = self.tables[table_name].histograms[key]
             hist_b = self.tables[rtable_name].histograms[r_key]
-            res = HistogramId.estimate_overlap(hist_a, hist_b)
+            res = Histogram.estimate_overlap(hist_a, hist_b)
             return res
 
-    def calc_histograms(self):
-        table_list = [key for key in self.tables.keys()]
-
-        for table_name in table_list:
-            self.tables[table_name].calc_histograms()
-            gc.collect()
-
-    @staticmethod
-    def calc_histogram(tables, key_list):
-        for key in key_list:
-            tables[key].calc_histograms()
+    def calc_histograms(self, used_table_keys: dict):
+        for table in used_table_keys.keys():
+            used_keys = used_table_keys[table]
+            self.tables[table].calc_histograms(used_keys)
 
 
 class QueryManager(object):
     def __init__(self, file_dir, table_manager: TableManager):
         self.file_dir = file_dir
         self.table_manager = table_manager
+        self.used_keys = dict()
 
-    def process(self, file_name, ground_truth: list):
-        file_path = f'{self.file_dir}/{file_name}'
-        with open(file_path, 'r') as f:
-            raw_data = f.read()
-            statements = sqlparse.split(raw_data)
+    def get_var_cond(self, query):
+        var_list = []
+        conditions = []
+        for token in query.get_sublists():
+            if type(token) == sqlparse.sql.Where:
+                # The condition
+                for tk in token.tokens:
+                    if type(tk) == sqlparse.sql.Comparison:
+                        conditions.append(tk)
+            elif type(token) == sqlparse.sql.Identifier:
+                # single to select
+                var_list.append(str(token))
+            elif type(token) == sqlparse.sql.IdentifierList:
+                # Multipule to select
+                for tk in token.tokens:
+                    if type(tk) == sqlparse.sql.Identifier:
+                        var_list.append(str(tk))
+
+        variables = dict()
+        for v in var_list:
+            items = re.split(' ', v)
+            variables[items[1]] = items[0]
+        return variables, conditions
+
+    def precompute_used_keys(self, statements):
+        num = len(statements)
+        tk_list = []
+        with tqdm(total=num) as pbar:
+            pbar.set_description(f'Cache all used keys')
             for i, statement in enumerate(statements):
+                pbar.update()
                 parse_res = sqlparse.parse(statement)
                 if len(parse_res) == 0:
                     continue
                 query = parse_res[0]
-                var_list = []
-                conditions = []
-                for token in query.get_sublists():
-                    if type(token) == sqlparse.sql.Where:
-                        # The condition
-                        for tk in token.tokens:
-                            if type(tk) == sqlparse.sql.Comparison:
-                                conditions.append(tk)
-                    elif type(token) == sqlparse.sql.Identifier:
-                        # single to select
-                        var_list.append(str(token))
-                    elif type(token) == sqlparse.sql.IdentifierList:
-                        # Multipule to select
-                        for tk in token.tokens:
-                            if type(tk) == sqlparse.sql.Identifier:
-                                var_list.append(str(tk))
-                variables = dict()
-                for v in var_list:
-                    items = re.split(' ', v)
-                    variables[items[1]] = items[0]
+                variables, conditions = self.get_var_cond(query)
+                for cond in conditions:
+                    items = cond.tokens
+                    lv = re.split('\\.', str(items[0]))
+                    table_name, key = variables[lv[0]], lv[1]
+                    tk_list.append((table_name, key))
+                    comp = str(items[1])
+                    if comp == '=':
+                        rv = items[2]
+                        if type(rv) == sqlparse.sql.Identifier:
+                            tmp = re.split('\\.', str(rv))
+                            rtable_name, r_key = variables[tmp[0]], tmp[1]
+                            tk_list.append((rtable_name, r_key))
+
+        for table_name, key in tk_list:
+            try:
+                self.used_keys[table_name][key] = True
+            except KeyError:
+                self.used_keys[table_name] = dict()
+                self.used_keys[table_name][key] = True
+
+        for table in self.used_keys.keys():
+            self.used_keys[table] = list(self.used_keys[table].keys())
+
+    def process(self, file_name, ground_truth: list, limit=None):
+        file_path = f'{self.file_dir}/{file_name}'
+        ratio_list = []
+        with open(file_path, 'r') as f:
+            raw_data = f.read()
+            statements = sqlparse.split(raw_data)
+            self.precompute_used_keys(statements)
+            table_manager.calc_histograms(self.used_keys)
+            for i, statement in enumerate(statements):
+                if limit is not None and i > limit:
+                    break
+                parse_res = sqlparse.parse(statement)
+                if len(parse_res) == 0:
+                    continue
+                query = parse_res[0]
+                variables, conditions = self.get_var_cond(query)
                 res = self.estimate(variables, conditions)
-                print(
-                    f'Estimation / Ground Truth of query {i + 1} is: {res} vs {ground_truth[i]}, {res / ground_truth[i]}')
+                ratio = max(res, ground_truth[i]) / (min(res, ground_truth[i]) + 1e-1)
+                print(f'Ratio of query {i + 1} is: {ratio}')
+                ratio_list.append(ratio)
+        return ratio_list
 
     def estimate(self, variables: dict, conditions: list):
         estimation = 1
@@ -263,7 +254,6 @@ class QueryManager(object):
             tables[table_name] = True
             comp = str(items[1])
             if comp == '=':
-                # TODO
                 rv = items[2]
                 if type(rv) == sqlparse.sql.Identifier:
                     # like a.id = b.id
@@ -282,15 +272,6 @@ class QueryManager(object):
         return int(estimation)
 
 
-def test_table(csv_dir):
-    key_list = ['id', 'movie_id', 'title', 'imdb_index', 'kind_id', 'production_year', 'phonetic_code', 'episode_of_id',
-                'season_nr', 'episode_nr', 'note', 'md5sum']
-    type_list = ['integer', 'integer', 'character', 'character', 'integer', 'integer', 'character', 'integer',
-                 'integer', 'integer', 'character', 'character']
-    table = Table(key_list, type_list, csv_dir, 'aka_title')
-    table.calc_histograms()
-
-
 def load_true_rows(data_dir, level_name):
     answers = []
     with open(f'{data_dir}/{level_name}.normal', 'r') as f:
@@ -304,9 +285,12 @@ def test_query_manager(table_manager: TableManager):
     query_dir = '../data/sample_input_homework'
     true_dir = '../data/true_rows'
     ground_truth = load_true_rows(true_dir, 'easy')
-    file_name = 'test.sql'
+    file_name = 'easy.sql'
     query_manager = QueryManager(query_dir, table_manager)
-    query_manager.process(file_name, ground_truth)
+    res_list = query_manager.process(file_name, ground_truth, 50)
+    # print(f'Ratio info, mean: {np.mean(res_list)}, median: {np.median(res_list)}')
+    # plt.plot(res_list)
+    # plt.show()
 
 
 if __name__ == '__main__':
@@ -317,5 +301,4 @@ if __name__ == '__main__':
     statements = parser.ParseSQL(f'{csvDir}/schematext.sql')
     table_manager = TableManager(csvDir)
     table_manager.parse(statements)
-    table_manager.calc_histograms()
     test_query_manager(table_manager)
