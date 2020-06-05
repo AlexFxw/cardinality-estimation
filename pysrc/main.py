@@ -63,6 +63,8 @@ class Table(object):
                 print(f'Load cached histogram of table {self.chart_name}')
                 with open(checkpoint_path, 'rb') as f:
                     self.histograms = pickle.load(f)
+                    for key in self.histograms.keys():
+                        self.data_num = self.histograms[key].data_num
                 return
 
         key_index = [i for i, key_attr in enumerate(self.key_attributes) if key_attr.key_label in used_keys]
