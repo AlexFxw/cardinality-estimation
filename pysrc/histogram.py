@@ -1,5 +1,5 @@
 import numpy as np
-from numba import jit, jitclass, int32
+from numba import jit
 import numba as nb
 from dataclasses import dataclass
 from enum import Enum
@@ -35,6 +35,14 @@ def calc_overlap(a_values, a_counts, a_data_num, a_item_num,
     return res * a_num_inv * b_num_inv
 
 
+@jit(nopython=True, signature_or_function="int32(int32[:],int64[:])")
+def calc_sum(counts, items):
+    res = 0
+    for i, item in enumerate(items):
+        res = res + counts[item]
+    return res
+
+
 class Histogram:
     def __init__(self, raw_data: list, data_num: int):
         dh = collections.Counter(raw_data)
@@ -57,8 +65,8 @@ class Histogram:
                 items = np.argwhere(self.values < value)
             else:
                 items = np.argwhere(self.values > value)
-            cc = [self.counts[item[0]] for item in items.tolist()]
-            res = sum(cc)
+            items = np.reshape(items, len(items))
+            res = calc_sum(self.counts, items)
         return res / self.data_num
 
     @staticmethod

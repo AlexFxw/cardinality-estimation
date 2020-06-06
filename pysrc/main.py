@@ -222,9 +222,9 @@ class QueryManager(object):
         for table in self.used_keys.keys():
             self.used_keys[table] = list(self.used_keys[table].keys())
 
-    def process(self, file_name, ground_truth: list, limit=None):
+    def process(self, file_name, limit=None):
         file_path = f'{self.file_dir}/{file_name}'
-        ratio_list = []
+        res_list = []
         with open(file_path, 'r') as f:
             raw_data = f.read()
             statements = sqlparse.split(raw_data)
@@ -232,6 +232,7 @@ class QueryManager(object):
             table_manager.calc_histograms(self.used_keys)
             num = len(statements) if limit is None else min(limit, len(statements))
             with tqdm(total=num) as pbar:
+                pbar.set_description(f'Processing queires.')
                 for i, statement in enumerate(statements):
                     if limit is not None and i > limit:
                         break
@@ -241,11 +242,12 @@ class QueryManager(object):
                     query = parse_res[0]
                     variables, conditions = self.get_var_cond(query)
                     res = self.estimate(variables, conditions)
-                    ratio = max(res, ground_truth[i]) / (min(res, ground_truth[i]) + 1e-1)
-                    pbar.set_description(f'Ratio of query {i + 1} is: {ratio}')
+                    # ratio = max(res, ground_truth[i]) / (min(res, ground_truth[i]) + 1e-1)
+                    # pbar.set_description(f'Ratio of query {i} is: {ratio}')
+                    res_list.append(res)
                     pbar.update()
-                    ratio_list.append(ratio)
-        return ratio_list
+                    # ratio_list.append(ratio)
+        return res_list
 
     def estimate(self, variables: dict, conditions: list):
         estimation = 1
@@ -304,5 +306,6 @@ if __name__ == '__main__':
     ground_truth = load_true_rows(true_dir, args.level)
     file_name = f'{args.level}.sql'
     query_manager = QueryManager(query_dir, table_manager)
-    res_list = query_manager.process(file_name, ground_truth, args.limit)
-    print(f'Ratio info, mean: {np.mean(res_list)}, median: {np.median(res_list)}')
+    res_list = query_manager.process(file_name, args.limit)
+    ratio_list = [max(res, ground_truth[i]) / (min(res, ground_truth[i]) + 1e-1) for i, res in enumerate(res_list)]
+    print(f'Ratio info, mean: {np.mean(ratio_list)}, median: {np.median(ratio_list)}')
