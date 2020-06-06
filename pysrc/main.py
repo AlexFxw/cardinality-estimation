@@ -5,13 +5,11 @@ import numpy as np
 from enum import Enum
 from dataclasses import dataclass
 import re
-import gc
 from tqdm import tqdm
 import os
-from numba import jit
 import pickle
 from histogram import Histogram
-from matplotlib import pyplot as plt
+from argparse import ArgumentParser
 
 logger = utils.GetLogger('Main')
 
@@ -232,18 +230,21 @@ class QueryManager(object):
             statements = sqlparse.split(raw_data)
             self.precompute_used_keys(statements)
             table_manager.calc_histograms(self.used_keys)
-            for i, statement in enumerate(statements):
-                if limit is not None and i > limit:
-                    break
-                parse_res = sqlparse.parse(statement)
-                if len(parse_res) == 0:
-                    continue
-                query = parse_res[0]
-                variables, conditions = self.get_var_cond(query)
-                res = self.estimate(variables, conditions)
-                ratio = max(res, ground_truth[i]) / (min(res, ground_truth[i]) + 1e-1)
-                print(f'Ratio of query {i + 1} is: {ratio}')
-                ratio_list.append(ratio)
+            num = len(statements) if limit is None else min(limit, len(statements))
+            with tqdm(total=num) as pbar:
+                for i, statement in enumerate(statements):
+                    if limit is not None and i > limit:
+                        break
+                    parse_res = sqlparse.parse(statement)
+                    if len(parse_res) == 0:
+                        continue
+                    query = parse_res[0]
+                    variables, conditions = self.get_var_cond(query)
+                    res = self.estimate(variables, conditions)
+                    ratio = max(res, ground_truth[i]) / (min(res, ground_truth[i]) + 1e-1)
+                    pbar.set_description(f'Ratio of query {i + 1} is: {ratio}')
+                    pbar.update()
+                    ratio_list.append(ratio)
         return ratio_list
 
     def estimate(self, variables: dict, conditions: list):
@@ -261,6 +262,7 @@ class QueryManager(object):
                     # like a.id = b.id
                     tmp = re.split('\\.', str(rv))
                     rvalue = (variables[tmp[0]], tmp[1])
+                    tables[variables[tmp[0]]] = True
                 else:
                     # like a.id = 233
                     rvalue = np.int32(str(rv))
@@ -283,24 +285,24 @@ def load_true_rows(data_dir, level_name):
     return answers
 
 
-def test_query_manager(table_manager: TableManager):
-    query_dir = '../data/sample_input_homework'
-    true_dir = '../data/true_rows'
-    ground_truth = load_true_rows(true_dir, 'easy')
-    file_name = 'easy.sql'
-    query_manager = QueryManager(query_dir, table_manager)
-    res_list = query_manager.process(file_name, ground_truth, 50)
-    print(f'Ratio info, mean: {np.mean(res_list)}, median: {np.median(res_list)}')
-    # plt.plot(res_list)
-    # plt.show()
-
-
 if __name__ == '__main__':
+    arg_parser = ArgumentParser()
+    arg_parser.add_argument('--level', type=str, dest='level', default='easy')
+    arg_parser.add_argument('--limit', type=int, dest='limit')
+    arg_parser.add_argument('--no-cache', action="store_true", dest="no_cache")
+    args = arg_parser.parse_args()
+    utils.use_checkpoints = not args.no_cache
+    utils.write_checkpoints = args.no_cache
     dataDir = '../data'
     csvDir = '../data/clean-imdb'
-    # test_table(csvDir)
-    # ParseSQL(f'../data/sample_input_homework/easy.sql')
+    query_dir = '../data/sample_input_homework'
+    true_dir = '../data/true_rows'
     statements = parser.ParseSQL(f'{csvDir}/schematext.sql')
     table_manager = TableManager(csvDir)
     table_manager.parse(statements)
-    test_query_manager(table_manager)
+    level = args.level
+    ground_truth = load_true_rows(true_dir, args.level)
+    file_name = f'{args.level}.sql'
+    query_manager = QueryManager(query_dir, table_manager)
+    res_list = query_manager.process(file_name, ground_truth, args.limit)
+    print(f'Ratio info, mean: {np.mean(res_list)}, median: {np.median(res_list)}')
