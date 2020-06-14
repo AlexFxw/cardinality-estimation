@@ -309,3 +309,6 @@ if __name__ == '__main__':
     res_list = query_manager.process(file_name, args.limit)
     ratio_list = [max(res, ground_truth[i]) / (min(res, ground_truth[i]) + 1e-1) for i, res in enumerate(res_list)]
     print(f'Ratio info, mean: {np.mean(ratio_list)}, median: {np.median(ratio_list)}')
+    with open(f'{query_dir}/{args.level}_res.txt', 'w') as f:
+        for i, res in enumerate(res_list):
+            f.write(f'{res}\n')
