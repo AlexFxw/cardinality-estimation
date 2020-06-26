@@ -97,7 +97,7 @@ class Table(object):
                 self.histograms[key] = Histogram(cache_data[key], self.data_num)
 
             if utils.write_checkpoints:
-                print(f'Save the cache histograms of {self.chart_name}')
+                # print(f'Save the cache histograms of {self.chart_name}')
                 with open(checkpoint_path, 'wb') as pkl:
                     pickle.dump(self.histograms, pkl)
 
